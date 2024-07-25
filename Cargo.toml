@@ -1,0 +1,42 @@
+[package]
+name = "quark-im"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# common
+anyhow = "1"
+parking_lot = "0"
+pin-project-lite = "0"
+
+# logger
+tracing = "0"
+tracing-subscriber = "0"
+
+# async runtime
+futures = "0"
+async-trait = "0"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0", features = ["full"] }
+tokio-serde = { version = "0", features = ["messagepack"] }
+reqwest = { version = "0", features = [
+    "json",
+    "stream",
+    "rustls-tls",
+    "cookies",
+    "deflate",
+    "gzip",
+    "zstd",
+] }
+
+# codec
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+bytes = "1"
+uuid = { version = "1", features = ["serde", "fast-rng", "v4"] }
+
+# storage
+dashmap = "6"
+
+# transport layer
+s2n-quic = { version = "1", features = ["provider-event-tracing"] }
