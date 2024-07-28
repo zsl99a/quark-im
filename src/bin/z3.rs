@@ -1,7 +1,8 @@
-use std::{net::SocketAddr, time::Instant};
+use std::net::SocketAddr;
 
 use anyhow::Result;
 use axum::{extract::State, routing::get, Json, Router};
+use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
 use quark_im::{
     app_error,
@@ -11,7 +12,7 @@ use quark_im::{
     negotiator::Negotiator,
     quic::{create_client, create_server},
     routing::{PeerInfo, Routing, RoutingStore},
-    starting::{client_starting, server_starting},
+    starting::{session_online, worker_starting},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -48,12 +49,34 @@ async fn main() -> Result<()> {
     let routes = Router::new().route("/", get(get_routing)).with_state(routing.clone());
     let server_addr = SocketAddr::from(([0, 0, 0, 0], server_port + 1));
     let tcp_listener = tokio::net::TcpListener::bind(&server_addr).await?;
+    tokio::spawn(async move { axum::serve(tcp_listener, routes.into_make_service()).await });
 
-    tokio::select! {
-        _ = client_starting(rx, client, routing.clone(), start_service) => {}
-        _ = server_starting(server, routing.clone(), start_service) => {}
-        _ = axum::serve(tcp_listener, routes.into_make_service()) => {}
-    }
+    worker_starting(rx, client, server, move |stream, connection| {
+        let routing = routing.clone();
+
+        session_online(stream, routing.clone(), async move {
+            let (mut handle, mut acceptor) = connection.split();
+
+            tokio::spawn(async move {
+                let stream = handle.open_bidirectional_stream().await?;
+                speed_test_client(stream).await
+            });
+
+            // service
+            while let Ok(Some(mut stream)) = acceptor.accept_bidirectional_stream().await {
+                let routing = routing.clone();
+                tokio::spawn(async move {
+                    // negotiator
+                    let mut negotiator = Negotiator::<String, _>::new(&mut stream);
+                    let service = negotiator.recv().await?;
+
+                    // service
+                    start_service(stream, routing, service).await
+                });
+            }
+        })
+    })
+    .await;
 
     Ok(())
 }
@@ -74,45 +97,33 @@ where
     Ok(())
 }
 
-async fn _speed_test_client<I>(mut stream: I) -> Result<()>
+async fn speed_test_client<I>(mut stream: I) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Send + Unpin,
 {
     let mut negotiator = Negotiator::new(&mut stream);
     negotiator.send("speed_test".to_string()).await?;
-    let _ = negotiator.recv().await?;
-    drop(negotiator);
 
-    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<String, String>::default());
+    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<DateTime<Utc>, DateTime<Utc>>::default());
 
-    let ins = Instant::now();
-
-    let msg_count = 1000;
-
-    for i in 0..msg_count {
-        stream.send(format!("Hello World {}", i)).await?;
-    }
-
-    let mut count: i64 = 0;
+    stream.send(Utc::now()).await?;
+    stream.send(Utc::now()).await?;
+    stream.send(Utc::now()).await?;
 
     while let Some(Ok(message)) = stream.next().await {
-        count += 1;
-        if count == msg_count {
-            tracing::info!(elapsed = ?ins.elapsed(), message)
-        }
+        tracing::info!(?message);
     }
-
-    Ok(())
+    Result::<()>::Ok(())
 }
 
 async fn speed_test_service<I>(stream: I) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Send + Unpin,
 {
-    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<String, String>::default());
+    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<DateTime<Utc>, DateTime<Utc>>::default());
 
-    while let Some(Ok(message)) = stream.next().await {
-        stream.send(message).await?;
+    while let Some(Ok(_message)) = stream.next().await {
+        stream.send(Utc::now()).await?;
     }
 
     Ok(())
