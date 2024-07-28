@@ -18,7 +18,7 @@ use crate::{
 pub async fn session_online<I, Fut>(stream: I, routing: Routing, future: Fut) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Send + Unpin,
-    Fut: Future<Output = ()> + Send,
+    Fut: Future<Output = Result<()>> + Send,
 {
     let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<PeerInfo, PeerInfo>::default());
 
@@ -27,9 +27,15 @@ where
     stream.send(peer_info.clone()).await?;
 
     let peer_info = stream.next().await.context("failed to receive peer_info")??;
-    routing.lock().await.peers.insert(peer_info.peer_id, peer_info.clone());
 
-    future.await;
+    let mut lock = routing.lock().await;
+    if lock.peers.contains_key(&peer_info.peer_id) {
+        anyhow::bail!("peer_id already exists");
+    }
+    lock.peers.insert(peer_info.peer_id, peer_info.clone());
+    drop(lock);
+
+    future.await?;
 
     routing.lock().await.peers.remove(&peer_info.peer_id);
 

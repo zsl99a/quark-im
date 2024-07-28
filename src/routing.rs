@@ -18,7 +18,7 @@ impl Deref for Routing {
 impl Routing {
     pub fn new(local_info: PeerInfo) -> Self {
         let store = RoutingStore {
-            leader: true,
+            leader: false,
             peer_id: local_info.peer_id,
             peers: BTreeMap::from([(local_info.peer_id, local_info)]),
         };

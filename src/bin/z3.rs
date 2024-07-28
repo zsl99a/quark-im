@@ -52,15 +52,17 @@ async fn main() -> Result<()> {
     tokio::spawn(async move { axum::serve(tcp_listener, routes.into_make_service()).await });
 
     worker_starting(rx, client, server, move |stream, connection| {
+        let tx = tx.clone();
         let routing = routing.clone();
 
         session_online(stream, routing.clone(), async move {
             let (mut handle, mut acceptor) = connection.split();
 
-            tokio::spawn(async move {
-                let stream = handle.open_bidirectional_stream().await?;
-                speed_test_client(stream).await
-            });
+            let stream = handle.open_bidirectional_stream().await?;
+            tokio::spawn(referral_client(stream, tx.clone()));
+
+            let stream = handle.open_bidirectional_stream().await?;
+            tokio::spawn(speed_test_client(stream));
 
             // service
             while let Ok(Some(mut stream)) = acceptor.accept_bidirectional_stream().await {
@@ -74,6 +76,8 @@ async fn main() -> Result<()> {
                     start_service(stream, routing, service).await
                 });
             }
+
+            Result::<()>::Ok(())
         })
     })
     .await;
@@ -85,14 +89,48 @@ async fn get_routing(State(state): State<Routing>) -> app_error::Result<Json<Rou
     Ok(Json(state.lock().await.clone()))
 }
 
-async fn start_service<I>(stream: I, _routing: Routing, service: String) -> Result<()>
+async fn start_service<I>(stream: I, routing: Routing, service: String) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Send + Unpin,
 {
     match service.as_str() {
+        "referral" => referral_service(stream, routing).await?,
         "speed_test" => speed_test_service(stream).await?,
         _ => {}
     }
+
+    Ok(())
+}
+
+async fn referral_client<I>(mut stream: I, tx: mpsc::Sender<SocketAddr>) -> Result<()>
+where
+    I: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    let mut negotiator = Negotiator::new(&mut stream);
+    negotiator.send("referral".to_string()).await?;
+
+    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<PeerInfo, ()>::default());
+
+    while let Some(Ok(peer_info)) = stream.next().await {
+        for endpoint in peer_info.endpoints {
+            tx.send(endpoint).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn referral_service<I>(stream: I, routing: Routing) -> Result<()>
+where
+    I: AsyncRead + AsyncWrite + Send + Unpin,
+{
+    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<(), PeerInfo>::default());
+
+    for (_, peer_info) in &routing.lock().await.peers {
+        stream.send(peer_info.clone()).await?;
+    }
+
+    while let Some(Ok(_message)) = stream.next().await {}
 
     Ok(())
 }
