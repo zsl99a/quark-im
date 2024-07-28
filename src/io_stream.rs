@@ -28,8 +28,8 @@ where
         Self {
             io,
             buffer: VecDeque::new(),
-            read_buf: BytesMut::new(),
-            write_buf: BytesMut::new(),
+            read_buf: BytesMut::with_capacity(4096),
+            write_buf: BytesMut::with_capacity(4096),
             codec: LengthDelimitedCodec::new(),
         }
     }
@@ -46,27 +46,32 @@ where
             return Poll::Ready(Some(Ok(msg)));
         }
 
-        let mut src = self.read_buf.split();
+        let read_buf = unsafe { &mut *(&mut self.read_buf as *mut _) };
+
+        let mut is_eof = false;
 
         loop {
-            match self.io.read_buf(&mut src).boxed().poll_unpin(cx) {
-                Poll::Ready(Ok(_n)) => {}
+            match self.io.read_buf(read_buf).boxed().poll_unpin(cx) {
+                Poll::Ready(Ok(n)) => {
+                    if n == 0 {
+                        is_eof = true;
+                        break;
+                    }
+                }
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
                 Poll::Pending => break,
             }
         }
 
-        if src.is_empty() {
-            return Poll::Pending;
-        }
-
-        while let Ok(Some(message)) = self.codec.decode(&mut src) {
+        while let Ok(Some(message)) = self.codec.decode(read_buf) {
             self.buffer.push_back(message);
         }
 
-        self.read_buf = src;
-
         if self.buffer.is_empty() {
+            if is_eof {
+                return Poll::Ready(None);
+            }
+
             return Poll::Pending;
         }
 
@@ -89,16 +94,13 @@ where
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> std::io::Result<()> {
-        let mut dst = BytesMut::new();
-        self.codec.encode(item, &mut dst)?;
-        self.write_buf.extend_from_slice(&dst);
-        Ok(())
+        let write_buf = unsafe { &mut *(&mut self.write_buf as *mut _) };
+        self.codec.encode(item, write_buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let mut dst = self.write_buf.split();
-        let _ = self.io.write_buf(&mut dst).boxed().poll_unpin(cx)?;
-        Poll::Ready(Ok(()))
+        let write_buf = unsafe { &mut *(&mut self.write_buf as *mut _) };
+        self.io.write_buf(write_buf).boxed().poll_unpin(cx).map_ok(|_n| ())
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {

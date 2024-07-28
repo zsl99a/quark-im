@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 # common
+dotenvy = "0"
 anyhow = "1"
 parking_lot = "0"
 pin-project-lite = "0"
@@ -34,9 +35,16 @@ serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 bytes = "1"
 uuid = { version = "1", features = ["serde", "fast-rng", "v4"] }
+chrono = { version = "0", features = ["serde"] }
 
 # storage
 dashmap = "6"
 
 # transport layer
 s2n-quic = { version = "1", features = ["provider-event-tracing"] }
+
+# web layer
+axum = { version = "0", features = ["ws", "macros"] }
+axum-extra = { version = "0", features = ["typed-header"] }
+tower = { version = "0", features = ["full"] }
+tower-http = { version = "0", features = ["full"] }
