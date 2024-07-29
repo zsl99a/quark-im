@@ -4,10 +4,9 @@ use anyhow::Result;
 use axum::{extract::State, routing::get, Json, Router};
 use quark_im::{
     app_error,
-    negotiator::Negotiator,
     quic::{create_client, create_server},
     routing::{PeerInfo, Routing, RoutingStore},
-    starting::{session_online, worker_starting},
+    starting::{connection_starting, session_online, stream_starting, ServiceMode},
 };
 use tokio::sync::mpsc;
 use tracing::Level;
@@ -33,9 +32,9 @@ async fn main() -> Result<()> {
 
     let routing = Routing::new(local_info);
 
-    let (tx, rx) = mpsc::channel(128);
+    let (new_connection_tx, new_connection_rx) = mpsc::channel(32);
     if let Ok(connect_endpoint) = quark_connect_endpoint {
-        tx.send(connect_endpoint).await?;
+        new_connection_tx.send(connect_endpoint).await?;
     }
 
     let routes = Router::new().route("/", get(get_routing)).with_state(routing.clone());
@@ -43,41 +42,34 @@ async fn main() -> Result<()> {
     let tcp_listener = tokio::net::TcpListener::bind(&server_addr).await?;
     tokio::spawn(async move { axum::serve(tcp_listener, routes.into_make_service()).await });
 
-    worker_starting(rx, client, server, move |stream, connection| {
-        let tx = tx.clone();
+    connection_starting(new_connection_rx, client, server, move |stream, connection| {
+        let new_connection_tx = new_connection_tx.clone();
         let routing = routing.clone();
 
         session_online(stream, routing.clone(), async move {
-            let (mut handle, mut acceptor) = connection.split();
+            let (new_stream_tx, new_stream_rx) = mpsc::channel::<String>(32);
 
-            let mut stream = handle.open_bidirectional_stream().await?;
-            let mut negotiator = Negotiator::new(&mut stream);
-            negotiator.send(referral_service::NAME.to_string()).await?;
-            tokio::spawn(referral_service::start(stream, routing.clone(), tx.clone()));
+            new_stream_tx.send(referral_service::NAME.into()).await?;
+            new_stream_tx.send(speed_test_service::NAME.into()).await?;
 
-            let mut stream = handle.open_bidirectional_stream().await?;
-            let mut negotiator = Negotiator::new(&mut stream);
-            negotiator.send(speed_test_service::NAME.to_string()).await?;
-            tokio::spawn(speed_test_service::start(stream));
-
-            while let Ok(Some(mut stream)) = acceptor.accept_bidirectional_stream().await {
+            stream_starting(new_stream_rx, connection, move |stream, service_name, service_mode| {
                 let routing = routing.clone();
+                let new_connection_tx = new_connection_tx.clone();
 
-                tokio::spawn(async move {
-                    let mut negotiator = Negotiator::<String, _>::new(&mut stream);
-                    let service_name = negotiator.recv().await?;
-
-                    match service_name.as_str() {
-                        referral_service::NAME => referral_service::handle(stream, routing.clone()).await?,
-                        speed_test_service::NAME => speed_test_service::handle(stream).await?,
-                        _ => {}
+                async move {
+                    match (service_name.as_str(), service_mode) {
+                        (referral_service::NAME, ServiceMode::Start) => referral_service::start(stream, routing.clone(), new_connection_tx.clone()).await?,
+                        (referral_service::NAME, ServiceMode::Handle) => referral_service::handle(stream, routing.clone()).await?,
+                        (speed_test_service::NAME, ServiceMode::Start) => speed_test_service::start(stream).await?,
+                        (speed_test_service::NAME, ServiceMode::Handle) => speed_test_service::handle(stream).await?,
+                        _ => {
+                            tracing::warn!(service_name, ?service_mode, "failed to find service")
+                        }
                     }
-
-                    Result::<()>::Ok(())
-                });
-            }
-
-            Ok(())
+                    Ok(())
+                }
+            })
+            .await
         })
     })
     .await;
