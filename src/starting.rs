@@ -98,16 +98,11 @@ where
         while let Some(service_name) = rx.recv().await {
             let mut handle = handle.clone();
             let handle_stream = handle_stream.clone();
-
             tokio::spawn(async move {
                 let mut stream = handle.open_bidirectional_stream().await?;
-
                 let mut negotiator = Negotiator::new(&mut stream);
                 negotiator.send(service_name.clone()).await?;
-
-                handle_stream(stream, service_name, ServiceMode::Start).await?;
-
-                Result::<()>::Ok(())
+                handle_stream(stream, service_name, ServiceMode::Start).await
             });
         }
 
@@ -117,14 +112,10 @@ where
     let accept_future = async {
         while let Ok(Some(mut stream)) = acceptor.accept_bidirectional_stream().await {
             let handle_stream = handle_stream.clone();
-
             tokio::spawn(async move {
                 let mut negotiator = Negotiator::new(&mut stream);
                 let service_name = negotiator.recv().await?;
-
-                handle_stream(stream, service_name, ServiceMode::Handle).await?;
-
-                Result::<()>::Ok(())
+                handle_stream(stream, service_name, ServiceMode::Handle).await
             });
         }
 
