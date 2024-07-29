@@ -2,22 +2,14 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use axum::{extract::State, routing::get, Json, Router};
-use chrono::{DateTime, Utc};
-use futures::{SinkExt, StreamExt};
 use quark_im::{
     app_error,
-    framed_stream::FramedStream,
-    io_stream::IoStream,
-    message_pack::MessagePack,
     negotiator::Negotiator,
     quic::{create_client, create_server},
     routing::{PeerInfo, Routing, RoutingStore},
     starting::{session_online, worker_starting},
 };
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 use tracing::Level;
 
 #[tokio::main]
@@ -58,26 +50,34 @@ async fn main() -> Result<()> {
         session_online(stream, routing.clone(), async move {
             let (mut handle, mut acceptor) = connection.split();
 
-            let stream = handle.open_bidirectional_stream().await?;
-            tokio::spawn(referral_client(stream, tx.clone()));
+            let mut stream = handle.open_bidirectional_stream().await?;
+            let mut negotiator = Negotiator::new(&mut stream);
+            negotiator.send(referral_service::NAME.to_string()).await?;
+            tokio::spawn(referral_service::start(stream, routing.clone(), tx.clone()));
 
-            let stream = handle.open_bidirectional_stream().await?;
-            tokio::spawn(speed_test_client(stream));
+            let mut stream = handle.open_bidirectional_stream().await?;
+            let mut negotiator = Negotiator::new(&mut stream);
+            negotiator.send(speed_test_service::NAME.to_string()).await?;
+            tokio::spawn(speed_test_service::start(stream));
 
-            // service
             while let Ok(Some(mut stream)) = acceptor.accept_bidirectional_stream().await {
                 let routing = routing.clone();
-                tokio::spawn(async move {
-                    // negotiator
-                    let mut negotiator = Negotiator::<String, _>::new(&mut stream);
-                    let service = negotiator.recv().await?;
 
-                    // service
-                    start_service(stream, routing, service).await
+                tokio::spawn(async move {
+                    let mut negotiator = Negotiator::<String, _>::new(&mut stream);
+                    let service_name = negotiator.recv().await?;
+
+                    match service_name.as_str() {
+                        referral_service::NAME => referral_service::handle(stream, routing.clone()).await?,
+                        speed_test_service::NAME => speed_test_service::handle(stream).await?,
+                        _ => {}
+                    }
+
+                    Result::<()>::Ok(())
                 });
             }
 
-            Result::<()>::Ok(())
+            Ok(())
         })
     })
     .await;
@@ -89,80 +89,100 @@ async fn get_routing(State(state): State<Routing>) -> app_error::Result<Json<Rou
     Ok(Json(state.lock().await.clone()))
 }
 
-async fn start_service<I>(stream: I, routing: Routing, service: String) -> Result<()>
-where
-    I: AsyncRead + AsyncWrite + Send + Unpin,
-{
-    match service.as_str() {
-        "referral" => referral_service(stream, routing).await?,
-        "speed_test" => speed_test_service(stream).await?,
-        _ => {}
-    }
+mod referral_service {
+    use std::net::SocketAddr;
 
-    Ok(())
-}
+    use anyhow::Result;
+    use futures::{SinkExt, StreamExt};
+    use quark_im::{
+        framed_stream::FramedStream,
+        io_stream::IoStream,
+        message_pack::MessagePack,
+        negotiator::Negotiator,
+        routing::{PeerInfo, Routing},
+    };
+    use tokio::{
+        io::{AsyncRead, AsyncWrite},
+        sync::mpsc,
+    };
 
-async fn referral_client<I>(mut stream: I, tx: mpsc::Sender<SocketAddr>) -> Result<()>
-where
-    I: AsyncRead + AsyncWrite + Send + Unpin,
-{
-    let mut negotiator = Negotiator::new(&mut stream);
-    negotiator.send("referral".to_string()).await?;
+    pub const NAME: &'static str = "ReferralService";
 
-    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<PeerInfo, ()>::default());
+    pub async fn start<I>(mut stream: I, routing: Routing, sender: mpsc::Sender<SocketAddr>) -> Result<()>
+    where
+        I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let mut negotiator = Negotiator::new(&mut stream);
+        negotiator.send(NAME.to_string()).await?;
 
-    while let Some(Ok(peer_info)) = stream.next().await {
-        for endpoint in peer_info.endpoints {
-            tx.send(endpoint).await?;
+        let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<PeerInfo, ()>::default());
+
+        while let Some(Ok(peer_info)) = stream.next().await {
+            if !routing.lock().await.peers.contains_key(&peer_info.peer_id) {
+                for endpoint in peer_info.endpoints {
+                    sender.send(endpoint).await?;
+                }
+            }
         }
+
+        Ok(())
     }
 
-    Ok(())
-}
+    pub async fn handle<I>(stream: I, routing: Routing) -> Result<()>
+    where
+        I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<(), PeerInfo>::default());
 
-async fn referral_service<I>(stream: I, routing: Routing) -> Result<()>
-where
-    I: AsyncRead + AsyncWrite + Send + Unpin,
-{
-    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<(), PeerInfo>::default());
+        for peer_info in routing.lock().await.peers.values().cloned() {
+            stream.send(peer_info).await?;
+        }
 
-    for (_, peer_info) in &routing.lock().await.peers {
-        stream.send(peer_info.clone()).await?;
+        while let Some(Ok(_message)) = stream.next().await {}
+
+        Ok(())
     }
-
-    while let Some(Ok(_message)) = stream.next().await {}
-
-    Ok(())
 }
 
-async fn speed_test_client<I>(mut stream: I) -> Result<()>
-where
-    I: AsyncRead + AsyncWrite + Send + Unpin,
-{
-    let mut negotiator = Negotiator::new(&mut stream);
-    negotiator.send("speed_test".to_string()).await?;
+mod speed_test_service {
+    use anyhow::Result;
+    use chrono::{DateTime, Utc};
+    use futures::{SinkExt, StreamExt};
+    use quark_im::{framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, negotiator::Negotiator};
+    use tokio::io::{AsyncRead, AsyncWrite};
 
-    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<DateTime<Utc>, DateTime<Utc>>::default());
+    pub const NAME: &'static str = "SpeedTestService";
 
-    stream.send(Utc::now()).await?;
-    stream.send(Utc::now()).await?;
-    stream.send(Utc::now()).await?;
+    pub async fn start<I>(mut stream: I) -> Result<()>
+    where
+        I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let mut negotiator = Negotiator::new(&mut stream);
+        negotiator.send(NAME.to_string()).await?;
 
-    while let Some(Ok(message)) = stream.next().await {
-        tracing::info!(?message);
-    }
-    Result::<()>::Ok(())
-}
+        let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<DateTime<Utc>, DateTime<Utc>>::default());
 
-async fn speed_test_service<I>(stream: I) -> Result<()>
-where
-    I: AsyncRead + AsyncWrite + Send + Unpin,
-{
-    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<DateTime<Utc>, DateTime<Utc>>::default());
-
-    while let Some(Ok(_message)) = stream.next().await {
         stream.send(Utc::now()).await?;
+        stream.send(Utc::now()).await?;
+        stream.send(Utc::now()).await?;
+
+        while let Some(Ok(message)) = stream.next().await {
+            tracing::info!(?message);
+        }
+
+        Ok(())
     }
 
-    Ok(())
+    pub async fn handle<I>(stream: I) -> Result<()>
+    where
+        I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<DateTime<Utc>, DateTime<Utc>>::default());
+
+        while let Some(Ok(_message)) = stream.next().await {
+            stream.send(Utc::now()).await?;
+        }
+
+        Ok(())
+    }
 }
