@@ -1,2 +1,5 @@
-pub mod referral_service;
-pub mod speed_test_service;
+mod referral;
+mod speed_report;
+mod speed_test;
+
+pub use {referral::*, speed_report::*, speed_test::*};

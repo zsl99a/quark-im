@@ -9,3 +9,4 @@ pub mod serde_framed;
 pub mod service;
 pub mod services;
 pub mod starting;
+pub mod tasks;

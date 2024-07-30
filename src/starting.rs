@@ -8,6 +8,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
 };
+use uuid::Uuid;
 
 use crate::{
     framed_stream::FramedStream,
@@ -17,9 +18,10 @@ use crate::{
     routing::{PeerInfo, Routing},
 };
 
-pub async fn session_online<I, Fut>(stream: I, routing: Routing, future: Fut) -> Result<()>
+pub async fn session_online<I, F, Fut>(stream: I, routing: Routing, service_handle: F) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Send + Unpin,
+    F: FnOnce(Uuid) -> Fut,
     Fut: Future<Output = Result<()>> + Send,
 {
     let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<PeerInfo, PeerInfo>::default());
@@ -37,7 +39,7 @@ where
     lock.peers.insert(peer_info.peer_id, peer_info.clone());
     drop(lock);
 
-    future.await?;
+    service_handle(peer_info.peer_id).await?;
 
     routing.lock().await.peers.remove(&peer_info.peer_id);
 
@@ -89,7 +91,7 @@ pub enum ServiceMode {
 pub async fn stream_starting<N, F, Fut>(mut rx: mpsc::Receiver<N>, connection: Connection, handle_stream: F) -> Result<()>
 where
     N: Serialize + DeserializeOwned + Send + Clone + 'static,
-    F: Fn(BidirectionalStream, N, ServiceMode) -> Fut + Send + Clone + 'static,
+    F: FnOnce(BidirectionalStream, N, ServiceMode) -> Fut + Send + Clone + 'static,
     Fut: Future<Output = Result<()>> + Send,
 {
     let (handle, mut acceptor) = connection.split();
@@ -105,8 +107,6 @@ where
                 handle_stream(stream, service_name, ServiceMode::Start).await
             });
         }
-
-        Result::<()>::Ok(())
     };
 
     let accept_future = async {
@@ -118,8 +118,6 @@ where
                 handle_stream(stream, service_name, ServiceMode::Handle).await
             });
         }
-
-        Result::<()>::Ok(())
     };
 
     tokio::select! {

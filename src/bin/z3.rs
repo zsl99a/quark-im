@@ -1,24 +1,24 @@
-use std::net::SocketAddr;
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use axum::{extract::State, routing::get, Json, Router};
+use dashmap::DashMap;
 use quark_im::{
     app_error,
     quic::{create_client, create_server},
     routing::{PeerInfo, Routing, RoutingStore},
-    services::{referral_service, speed_test_service},
+    service::Service,
+    services::{ReferralService, SpeedReportService, SpeedTestService},
     starting::{connection_starting, session_online, stream_starting, ServiceMode},
+    tasks::RoutingQueryTask,
 };
 use tokio::sync::mpsc;
 use tracing::Level;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
-        .with_max_level(Level::INFO)
-        .init();
+    tracing_subscriber::fmt().with_file(true).with_line_number(true).with_max_level(Level::INFO).init();
 
     let quark_server_port = dotenvy::var("QUARK_SERVER_PORT").unwrap_or("0".into()).parse()?;
     let quark_connect_endpoint = dotenvy::var("QUARK_CONNECT_ENDPOINT").unwrap_or_default().parse();
@@ -33,42 +33,51 @@ async fn main() -> Result<()> {
 
     let routing = Routing::new(local_info);
 
-    let routes = Router::new().route("/", get(get_routing)).with_state(routing.clone());
-    let server_addr = SocketAddr::from(([0, 0, 0, 0], server_port + 1));
-    let tcp_listener = tokio::net::TcpListener::bind(&server_addr).await?;
-    tokio::spawn(async move { axum::serve(tcp_listener, routes.into_make_service()).await });
-
     let (new_connection_tx, new_connection_rx) = mpsc::channel(32);
     if let Ok(connect_endpoint) = quark_connect_endpoint {
         new_connection_tx.send(connect_endpoint).await?;
     }
+    let state = QuarkState {
+        routing,
+        new_connection_tx,
+        speeds: Arc::new(DashMap::new()),
+        speed_report: Arc::new(DashMap::new()),
+    };
+
+    tokio::spawn(RoutingQueryTask::new(state.routing.lock().await.peer_id, state.speeds.clone(), state.speed_report.clone()).future());
+
+    let routes = Router::new()
+        .route("/routing", get(get_routing))
+        .route("/speeds", get(get_speeds))
+        .route("/speed_report", get(get_speed_report))
+        .with_state(state.clone());
+    let server_addr = SocketAddr::from(([0, 0, 0, 0], server_port + 1));
+    let tcp_listener = tokio::net::TcpListener::bind(&server_addr).await?;
+    tokio::spawn(async move { axum::serve(tcp_listener, routes.into_make_service()).await });
 
     connection_starting(new_connection_rx, client, server, move |stream, connection| {
-        let routing = routing.clone();
-        let new_connection_tx = new_connection_tx.clone();
+        let state = state.clone();
 
-        session_online(stream, routing.clone(), async move {
+        session_online(stream, state.routing.clone(), |peer_id| async move {
             let (new_stream_tx, new_stream_rx) = mpsc::channel::<String>(32);
 
-            new_stream_tx.send(referral_service::NAME.into()).await?;
-            new_stream_tx.send(speed_test_service::NAME.into()).await?;
+            new_stream_tx.send(ReferralService::NAME.into()).await?;
+            new_stream_tx.send(SpeedTestService::NAME.into()).await?;
+            new_stream_tx.send(SpeedReportService::NAME.into()).await?;
 
-            stream_starting(new_stream_rx, connection, move |stream, service_name, service_mode| {
-                let routing = routing.clone();
-                let new_connection_tx = new_connection_tx.clone();
-
-                async move {
-                    match (service_name.as_str(), service_mode) {
-                        (referral_service::NAME, ServiceMode::Start) => referral_service::start(stream, routing.clone(), new_connection_tx.clone()).await?,
-                        (referral_service::NAME, ServiceMode::Handle) => referral_service::handle(stream, routing.clone()).await?,
-                        (speed_test_service::NAME, ServiceMode::Start) => speed_test_service::start(stream).await?,
-                        (speed_test_service::NAME, ServiceMode::Handle) => speed_test_service::handle(stream).await?,
-                        _ => {
-                            tracing::warn!(service_name, ?service_mode, "failed to find service")
-                        }
+            stream_starting(new_stream_rx, connection, move |stream, service_name, service_mode| async move {
+                match (service_name.as_str(), service_mode) {
+                    (ReferralService::NAME, ServiceMode::Start) => ReferralService::new(state.routing, state.new_connection_tx).start(stream).await?,
+                    (ReferralService::NAME, ServiceMode::Handle) => ReferralService::new(state.routing, state.new_connection_tx).handle(stream).await?,
+                    (SpeedTestService::NAME, ServiceMode::Start) => SpeedTestService::new(peer_id, state.speeds).start(stream).await?,
+                    (SpeedTestService::NAME, ServiceMode::Handle) => SpeedTestService::new(peer_id, state.speeds).handle(stream).await?,
+                    (SpeedReportService::NAME, ServiceMode::Start) => SpeedReportService::new(peer_id, state.speeds, state.speed_report).start(stream).await?,
+                    (SpeedReportService::NAME, ServiceMode::Handle) => SpeedReportService::new(peer_id, state.speeds, state.speed_report).handle(stream).await?,
+                    _ => {
+                        tracing::warn!(service_name, ?service_mode, "failed to find service")
                     }
-                    Ok(())
                 }
+                Ok(())
             })
             .await
         })
@@ -78,6 +87,30 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn get_routing(State(state): State<Routing>) -> app_error::Result<Json<RoutingStore>> {
-    Ok(Json(state.lock().await.clone()))
+#[derive(Debug, Clone)]
+pub struct QuarkState {
+    routing: Routing,
+    new_connection_tx: mpsc::Sender<SocketAddr>,
+    speeds: Arc<DashMap<Uuid, u64>>,
+    speed_report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
+}
+
+async fn get_routing(State(state): State<QuarkState>) -> app_error::Result<Json<RoutingStore>> {
+    Ok(Json(state.routing.lock().await.clone()))
+}
+
+async fn get_speeds(State(state): State<QuarkState>) -> app_error::Result<Json<BTreeMap<Uuid, u64>>> {
+    let mut speeds = BTreeMap::new();
+    for item in state.speeds.iter() {
+        speeds.insert(*item.key(), *item.value());
+    }
+    Ok(Json(speeds))
+}
+
+async fn get_speed_report(State(state): State<QuarkState>) -> app_error::Result<Json<BTreeMap<Uuid, BTreeMap<Uuid, u64>>>> {
+    let mut report = BTreeMap::new();
+    for item in state.speed_report.iter() {
+        report.insert(*item.key(), item.value().clone());
+    }
+    Ok(Json(report))
 }

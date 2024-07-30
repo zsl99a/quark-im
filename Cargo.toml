@@ -39,6 +39,7 @@ chrono = { version = "0", features = ["serde"] }
 
 # storage
 dashmap = "6"
+pathfinding = "4"
 
 # transport layer
 s2n-quic = { version = "1", features = ["provider-event-tracing"] }
