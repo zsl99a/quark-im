@@ -23,20 +23,14 @@ impl RoutingQueryTask {
 
 impl RoutingQueryTask {
     pub async fn future(self) {
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
 
         loop {
             let report = self.get_report();
 
-            let mut target_peer_ids = vec![];
-
-            for peer in self.speeds.iter() {
-                target_peer_ids.push(*peer.key())
-            }
-
-            for target_peer_id in target_peer_ids {
+            for target_id in self.speeds.iter() {
                 let path = pathfinding::prelude::dijkstra(
                     &self.peer_id,
                     |x| {
@@ -52,11 +46,11 @@ impl RoutingQueryTask {
                             })
                             .unwrap_or_default()
                     },
-                    |p| p == &target_peer_id,
+                    |p| p == target_id.key(),
                 );
 
                 if let Some(path) = path {
-                    self.paths.insert(target_peer_id, path);
+                    self.paths.insert(target_id.key().clone(), path);
                 }
             }
 
