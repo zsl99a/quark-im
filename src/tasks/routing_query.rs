@@ -11,13 +11,8 @@ pub struct RoutingQueryTask {
 }
 
 impl RoutingQueryTask {
-    pub fn new(peer_id: Uuid, speeds: Arc<DashMap<Uuid, u64>>, report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>) -> Self {
-        Self {
-            peer_id,
-            speeds,
-            report,
-            paths: Arc::new(DashMap::new()),
-        }
+    pub fn new(peer_id: Uuid, speeds: Arc<DashMap<Uuid, u64>>, report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>, paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>) -> Self {
+        Self { peer_id, speeds, report, paths }
     }
 }
 
@@ -55,8 +50,6 @@ impl RoutingQueryTask {
             }
 
             self.paths.retain(|key, _| self.speeds.get(key).is_some());
-
-            tracing::info!("\npeer_id: {:?}\npaths: {:#?}", self.peer_id, self.paths);
 
             interval.tick().await;
         }

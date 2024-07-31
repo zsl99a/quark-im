@@ -33,18 +33,27 @@ async fn main() -> Result<()> {
 
     let routing = Routing::new(local_info);
 
-    let (new_connection_tx, new_connection_rx) = mpsc::channel(32);
+    let (new_conn_tx, new_conn_rx) = mpsc::channel(32);
     if let Ok(connect_endpoint) = quark_connect_endpoint {
-        new_connection_tx.send(connect_endpoint).await?;
+        new_conn_tx.send(connect_endpoint).await?;
     }
     let state = QuarkState {
         routing,
-        new_connection_tx,
+        new_conn_tx,
         speeds: Arc::new(DashMap::new()),
         speed_report: Arc::new(DashMap::new()),
+        relay_paths: Arc::new(DashMap::new()),
     };
 
-    tokio::spawn(RoutingQueryTask::new(state.routing.lock().await.peer_id, state.speeds.clone(), state.speed_report.clone()).future());
+    tokio::spawn(
+        RoutingQueryTask::new(
+            state.routing.lock().await.peer_id,
+            state.speeds.clone(),
+            state.speed_report.clone(),
+            state.relay_paths.clone(),
+        )
+        .future(),
+    );
 
     let routes = Router::new()
         .route("/routing", get(get_routing))
@@ -55,10 +64,10 @@ async fn main() -> Result<()> {
     let tcp_listener = tokio::net::TcpListener::bind(&server_addr).await?;
     tokio::spawn(async move { axum::serve(tcp_listener, routes.into_make_service()).await });
 
-    connection_starting(new_connection_rx, client, server, move |stream, connection| {
+    connection_starting(new_conn_rx, client, server, move |bi_stream, connection| {
         let state = state.clone();
 
-        session_online(stream, state.routing.clone(), |peer_id| async move {
+        session_online(bi_stream, state.routing.clone(), |peer_id| async move {
             let (new_stream_tx, new_stream_rx) = mpsc::channel::<String>(32);
 
             new_stream_tx.send(ReferralService::NAME.into()).await?;
@@ -67,8 +76,8 @@ async fn main() -> Result<()> {
 
             stream_starting(new_stream_rx, connection, move |stream, service_name, service_mode| async move {
                 match (service_name.as_str(), service_mode) {
-                    (ReferralService::NAME, ServiceMode::Start) => ReferralService::new(state.routing, state.new_connection_tx).start(stream).await?,
-                    (ReferralService::NAME, ServiceMode::Handle) => ReferralService::new(state.routing, state.new_connection_tx).handle(stream).await?,
+                    (ReferralService::NAME, ServiceMode::Start) => ReferralService::new(state.routing, state.new_conn_tx).start(stream).await?,
+                    (ReferralService::NAME, ServiceMode::Handle) => ReferralService::new(state.routing, state.new_conn_tx).handle(stream).await?,
                     (SpeedTestService::NAME, ServiceMode::Start) => SpeedTestService::new(peer_id, state.speeds).start(stream).await?,
                     (SpeedTestService::NAME, ServiceMode::Handle) => SpeedTestService::new(peer_id, state.speeds).handle(stream).await?,
                     (SpeedReportService::NAME, ServiceMode::Start) => SpeedReportService::new(peer_id, state.speeds, state.speed_report).start(stream).await?,
@@ -90,9 +99,10 @@ async fn main() -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct QuarkState {
     routing: Routing,
-    new_connection_tx: mpsc::Sender<SocketAddr>,
+    new_conn_tx: mpsc::Sender<SocketAddr>,
     speeds: Arc<DashMap<Uuid, u64>>,
     speed_report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
+    relay_paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>,
 }
 
 async fn get_routing(State(state): State<QuarkState>) -> app_error::Result<Json<RoutingStore>> {

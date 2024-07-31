@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use crate::{framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, service::Service};
 
-#[derive(Debug, Clone)]
 pub struct SpeedTestService {
     peer_id: Uuid,
     speeds: Arc<DashMap<Uuid, u64>>,

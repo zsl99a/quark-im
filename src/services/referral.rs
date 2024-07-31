@@ -16,7 +16,6 @@ use crate::{
     service::Service,
 };
 
-#[derive(Debug, Clone)]
 pub struct ReferralService {
     routing: Routing,
     sender: mpsc::Sender<SocketAddr>,
