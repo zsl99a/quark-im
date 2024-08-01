@@ -46,7 +46,7 @@ where
     Ok(())
 }
 
-pub async fn connection_starting<H, Fut>(mut receiver: mpsc::Receiver<SocketAddr>, client: Client, mut server: Server, start_service: H)
+pub async fn connection_starting<H, Fut>(mut receiver: mpsc::Receiver<SocketAddr>, client: Client, mut server: Server, start_service: H) -> Result<()>
 where
     H: Fn(BidirectionalStream, Connection) -> Fut + Send + Clone + 'static,
     Fut: Future<Output = Result<()>> + Send,
@@ -59,7 +59,9 @@ where
             tokio::spawn(async move {
                 let mut connection = client.connect(Connect::new(connect_endpoint).with_server_name("localhost")).await?;
                 connection.keep_alive(true)?;
+
                 let stream = connection.open_bidirectional_stream().await?;
+
                 start_service(stream, connection).await
             });
         }
@@ -71,6 +73,7 @@ where
 
             tokio::spawn(async move {
                 let stream = connection.accept_bidirectional_stream().await?.context("failed to accept stream")?;
+
                 start_service(stream, connection).await
             });
         }
@@ -80,6 +83,8 @@ where
         _ = client_loop => {},
         _ = server_loop => {},
     }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -88,7 +93,7 @@ pub enum ServiceMode {
     Handle,
 }
 
-pub async fn stream_starting<N, F, Fut>(mut rx: mpsc::Receiver<N>, connection: Connection, handle_stream: F) -> Result<()>
+pub async fn stream_starting<N, F, Fut>(mut receiver: mpsc::Receiver<N>, connection: Connection, handle_stream: F) -> Result<()>
 where
     N: Serialize + DeserializeOwned + Send + Clone + 'static,
     F: FnOnce(BidirectionalStream, N, ServiceMode) -> Fut + Send + Clone + 'static,
@@ -97,13 +102,16 @@ where
     let (handle, mut acceptor) = connection.split();
 
     let opener_future = async {
-        while let Some(service_name) = rx.recv().await {
+        while let Some(service_name) = receiver.recv().await {
             let mut handle = handle.clone();
             let handle_stream = handle_stream.clone();
+
             tokio::spawn(async move {
                 let mut stream = handle.open_bidirectional_stream().await?;
+
                 let mut negotiator = Negotiator::new(&mut stream);
                 negotiator.send(service_name.clone()).await?;
+
                 handle_stream(stream, service_name, ServiceMode::Start).await
             });
         }
@@ -112,9 +120,11 @@ where
     let accept_future = async {
         while let Ok(Some(mut stream)) = acceptor.accept_bidirectional_stream().await {
             let handle_stream = handle_stream.clone();
+
             tokio::spawn(async move {
                 let mut negotiator = Negotiator::new(&mut stream);
                 let service_name = negotiator.recv().await?;
+
                 handle_stream(stream, service_name, ServiceMode::Handle).await
             });
         }

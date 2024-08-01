@@ -91,9 +91,7 @@ async fn main() -> Result<()> {
             .await
         })
     })
-    .await;
-
-    Ok(())
+    .await
 }
 
 #[derive(Debug, Clone)]

@@ -35,7 +35,7 @@ impl RoutingQueryTask {
                                 x.iter()
                                     .map(|(k, v)| {
                                         // 多走一层节点需要增加一定数量的预估延迟，认为是系统内部的损耗 (µs)
-                                        (k.clone(), v + 1000)
+                                        (*k, v + 1000)
                                     })
                                     .collect::<Vec<_>>()
                             })
@@ -45,7 +45,7 @@ impl RoutingQueryTask {
                 );
 
                 if let Some(path) = path {
-                    self.paths.insert(target_id.key().clone(), path);
+                    self.paths.insert(*target_id.key(), path);
                 }
             }
 
