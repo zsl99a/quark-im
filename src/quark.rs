@@ -49,27 +49,28 @@ impl QuarkIM {
     }
 
     pub fn start_service_task(&self, peer_id: Uuid, name: String) {
-        self.start_service_task_with(peer_id, name, VecDeque::new())
+        self.start_service_task_with_link(name, VecDeque::from([peer_id]))
     }
 
     pub async fn open_service_stream(&self, peer_id: Uuid, name: String) -> Result<BidirectionalStream> {
-        self.open_service_stream_with(peer_id, name, VecDeque::new()).await
+        self.open_service_stream_with_link(name, VecDeque::from([peer_id])).await
     }
 
     pub async fn open_stream(&self, peer_id: Uuid) -> Result<BidirectionalStream> {
-        self.open_stream_with(peer_id, VecDeque::new()).await
+        self.open_stream_with_link(VecDeque::from([peer_id])).await
     }
 
-    pub fn start_service_task_with(&self, peer_id: Uuid, name: String, link_info: VecDeque<Uuid>) {
+    pub fn start_service_task_with_link(&self, name: String, link_info: VecDeque<Uuid>) {
         let im = self.clone();
         tokio::spawn(async move {
-            let stream = im.clone().open_service_stream_with(peer_id, name.clone(), link_info).await?;
+            let peer_id = *link_info.get(link_info.len() - 1).context("failed to get peer id")?;
+            let stream = im.clone().open_service_stream_with_link(name.clone(), link_info).await?;
             im.hooks.handle(&im, stream, peer_id, name, ServiceMode::Start).await
         });
     }
 
-    pub async fn open_service_stream_with(&self, peer_id: Uuid, name: String, link_info: VecDeque<Uuid>) -> Result<BidirectionalStream> {
-        let mut stream = self.open_stream_with(peer_id, link_info).await?;
+    pub async fn open_service_stream_with_link(&self, name: String, link_info: VecDeque<Uuid>) -> Result<BidirectionalStream> {
+        let mut stream = self.open_stream_with_link(link_info).await?;
 
         let mut negotiator = Negotiator::new(&mut stream);
         negotiator.send(name).await?;
@@ -77,7 +78,9 @@ impl QuarkIM {
         Ok(stream)
     }
 
-    pub async fn open_stream_with(&self, peer_id: Uuid, link_info: VecDeque<Uuid>) -> Result<BidirectionalStream> {
+    pub async fn open_stream_with_link(&self, mut link_info: VecDeque<Uuid>) -> Result<BidirectionalStream> {
+        let peer_id = link_info.pop_front().context("failed to get peer id")?;
+
         if let Some(handle) = self.handles.get(&peer_id) {
             let mut handle = handle.value().clone();
 
@@ -138,13 +141,14 @@ impl QuarkIM {
 
                 tokio::spawn(async move {
                     let mut negotiator = Negotiator::<VecDeque<Uuid>, _>::new(&mut stream);
-                    let mut link_info = negotiator.recv().await?;
+                    let link_info = negotiator.recv().await?;
 
-                    if let Some(next_peer_id) = link_info.pop_front() {
-                        let mut relay_stream = im.open_stream_with(next_peer_id, link_info).await?;
+                    if !link_info.is_empty() {
+                        let mut relay_stream = im.open_stream_with_link(link_info).await?;
 
                         while let Err(error) = tokio::io::copy_bidirectional(&mut stream, &mut relay_stream).await {
-                            tracing::error!(?error, "relay stream error")
+                            tracing::error!(?error, "relay stream error");
+                            break;
                         }
                     } else {
                         let mut negotiator = Negotiator::new(&mut stream);
