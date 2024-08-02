@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -10,22 +11,25 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
-use crate::{framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, abstracts::Service};
+use crate::{abstracts::Service, framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, quark::QuarkIM};
 
 pub struct SpeedTestService {
+    im: QuarkIM,
     peer_id: Uuid,
-    speeds: Arc<DashMap<Uuid, u64>>,
+    report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
 }
 
 impl SpeedTestService {
-    pub fn new(peer_id: Uuid, speeds: Arc<DashMap<Uuid, u64>>) -> Self {
-        Self { peer_id, speeds }
+    pub fn new(im: QuarkIM, peer_id: Uuid, report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>) -> Self {
+        Self { im, peer_id, report }
     }
 }
 
 impl Drop for SpeedTestService {
     fn drop(&mut self) {
-        self.speeds.remove(&self.peer_id);
+        if let Some(mut report) = self.report.get_mut(&self.im.peer_id) {
+            report.value_mut().remove(&self.peer_id);
+        }
     }
 }
 
@@ -50,7 +54,13 @@ impl Service for SpeedTestService {
 
             let elapsed = ins.elapsed().as_micros() as u64;
 
-            self.speeds.entry(self.peer_id).and_modify(|e| *e = (*e * 9 + elapsed) / 10).or_insert(elapsed);
+            let mut lock = self.report.entry(self.im.peer_id).or_insert(Default::default());
+            if let Some(e) = lock.get_mut(&self.peer_id) {
+                *e = (*e * 9 + elapsed) / 10
+            } else {
+                lock.insert(self.peer_id, elapsed);
+            }
+            drop(lock);
 
             interval.tick().await;
         }

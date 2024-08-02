@@ -5,14 +5,13 @@ use uuid::Uuid;
 
 pub struct RoutingQueryTask {
     peer_id: Uuid,
-    speeds: Arc<DashMap<Uuid, u64>>,
     report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
     paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>,
 }
 
 impl RoutingQueryTask {
-    pub fn new(peer_id: Uuid, speeds: Arc<DashMap<Uuid, u64>>, report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>, paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>) -> Self {
-        Self { peer_id, speeds, report, paths }
+    pub fn new(peer_id: Uuid, report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>, paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>) -> Self {
+        Self { peer_id, report, paths }
     }
 }
 
@@ -25,7 +24,7 @@ impl RoutingQueryTask {
         loop {
             let report = self.get_report();
 
-            for target_id in self.speeds.iter() {
+            for target_id in self.report.iter() {
                 let path = pathfinding::prelude::dijkstra(
                     &self.peer_id,
                     |x| {
@@ -49,7 +48,7 @@ impl RoutingQueryTask {
                 }
             }
 
-            self.paths.retain(|key, _| self.speeds.get(key).is_some());
+            self.paths.retain(|key, _| self.report.get(key).is_some());
 
             interval.tick().await;
         }
@@ -61,11 +60,11 @@ impl RoutingQueryTask {
             report.insert(*item.key(), item.value().clone());
         }
 
-        let mut speeds = BTreeMap::new();
-        for item in self.speeds.iter() {
-            speeds.insert(*item.key(), *item.value());
-        }
-        report.insert(self.peer_id, speeds);
+        // let mut speeds = BTreeMap::new();
+        // for item in self.speeds.iter() {
+        //     speeds.insert(*item.key(), *item.value());
+        // }
+        // report.insert(self.peer_id, speeds);
 
         report
     }

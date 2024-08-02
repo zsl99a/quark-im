@@ -40,27 +40,19 @@ async fn main() -> Result<()> {
     let mut local_info = PeerInfo::new();
     local_info.endpoints.push(SocketAddr::from(([127, 0, 0, 1], server_port)));
 
-    let state = QuarkState {
-        speeds: Arc::new(DashMap::new()),
-        speed_report: Arc::new(DashMap::new()),
-        relay_paths: Arc::new(DashMap::new()),
-    };
-
-    let mut local_info = PeerInfo::new();
-    local_info.endpoints.push(SocketAddr::from(([127, 0, 0, 1], server.local_addr()?.port())));
-
-    let im = QuarkIM::new(client, local_info, IMHook::new(state.clone()));
+    let hook = IMHook::new();
+    let im = QuarkIM::new(client, local_info, hook.clone());
     im.server_task(server);
 
     if let Ok(endpoint) = dotenvy::var("QUARK_CONNECT_ENDPOINT").unwrap_or_default().parse::<SocketAddr>() {
         im.connect(endpoint).await?;
     }
 
-    tokio::spawn(RoutingQueryTask::new(im.peer_id, state.speeds.clone(), state.speed_report.clone(), state.relay_paths.clone()).future());
+    tokio::spawn(RoutingQueryTask::new(im.peer_id, hook.speed_report.clone(), hook.relay_paths.clone()).future());
 
     // tokio::spawn(link_test(im.clone()));
 
-    let routes = root_route(im.clone(), state.clone());
+    let routes = root_route(im.clone(), hook.clone());
     let server_addr = SocketAddr::from(([0, 0, 0, 0], server_port + 1));
     let tcp_listener = tokio::net::TcpListener::bind(&server_addr).await?;
     axum::serve(tcp_listener, routes.into_make_service()).await?;
@@ -95,12 +87,16 @@ pub async fn link_test(im: QuarkIM) -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub struct IMHook {
-    state: QuarkState,
+    speed_report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
+    relay_paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>,
 }
 
 impl IMHook {
-    pub fn new(state: QuarkState) -> Self {
-        Self { state }
+    pub fn new() -> Self {
+        Self {
+            speed_report: Arc::new(DashMap::new()),
+            relay_paths: Arc::new(DashMap::new()),
+        }
     }
 }
 
@@ -113,15 +109,15 @@ impl QuarkIMHook for IMHook {
     }
 
     async fn handle(&self, im: &QuarkIM, mut stream: BidirectionalStream, peer_id: Uuid, name: String, mode: ServiceMode) -> Result<()> {
-        let state = self.state.clone();
+        let hook = self.clone();
 
         match (name.as_str(), mode) {
             (ReferralService::NAME, ServiceMode::Start) => ReferralService::new(im.clone()).start(stream).await?,
             (ReferralService::NAME, ServiceMode::Handle) => ReferralService::new(im.clone()).handle(stream).await?,
-            (SpeedTestService::NAME, ServiceMode::Start) => SpeedTestService::new(peer_id, state.speeds).start(stream).await?,
-            (SpeedTestService::NAME, ServiceMode::Handle) => SpeedTestService::new(peer_id, state.speeds).handle(stream).await?,
-            (SpeedReportService::NAME, ServiceMode::Start) => SpeedReportService::new(peer_id, state.speeds, state.speed_report).start(stream).await?,
-            (SpeedReportService::NAME, ServiceMode::Handle) => SpeedReportService::new(peer_id, state.speeds, state.speed_report).handle(stream).await?,
+            (SpeedTestService::NAME, ServiceMode::Start) => SpeedTestService::new(im.clone(), peer_id, hook.speed_report).start(stream).await?,
+            (SpeedTestService::NAME, ServiceMode::Handle) => SpeedTestService::new(im.clone(), peer_id, hook.speed_report).handle(stream).await?,
+            (SpeedReportService::NAME, ServiceMode::Start) => SpeedReportService::new(im.clone(), peer_id, hook.speed_report).start(stream).await?,
+            (SpeedReportService::NAME, ServiceMode::Handle) => SpeedReportService::new(im.clone(), peer_id, hook.speed_report).handle(stream).await?,
             ("RelayDemoService", ServiceMode::Handle) => {
                 while let Some(Ok(item)) = stream.next().await {
                     tracing::info!(?item, "received");
@@ -136,20 +132,13 @@ impl QuarkIMHook for IMHook {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct QuarkState {
-    speeds: Arc<DashMap<Uuid, u64>>,
-    speed_report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
-    relay_paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>,
-}
-
-fn root_route(im: QuarkIM, state: QuarkState) -> Router {
+fn root_route(im: QuarkIM, state: IMHook) -> Router {
     Router::new()
         .route_service("/", Redirect::temporary("/routing").into_service())
         .route("/routing", get(get_routing))
         .with_state(im)
-        .route("/speeds", get(get_speeds))
         .route("/speed_report", get(get_speed_report))
+        .route("/relay_paths", get(get_relay_paths))
         .with_state(state)
 }
 
@@ -167,17 +156,17 @@ async fn get_routing(State(state): State<QuarkIM>) -> app_error::Result<Json<BTr
     ))
 }
 
-async fn get_speeds(State(state): State<QuarkState>) -> app_error::Result<Json<BTreeMap<Uuid, u64>>> {
-    let mut speeds = BTreeMap::new();
-    for item in state.speeds.iter() {
-        speeds.insert(*item.key(), *item.value());
-    }
-    Ok(Json(speeds))
-}
-
-async fn get_speed_report(State(state): State<QuarkState>) -> app_error::Result<Json<BTreeMap<Uuid, BTreeMap<Uuid, u64>>>> {
+async fn get_speed_report(State(state): State<IMHook>) -> app_error::Result<Json<BTreeMap<Uuid, BTreeMap<Uuid, u64>>>> {
     let mut report = BTreeMap::new();
     for item in state.speed_report.iter() {
+        report.insert(*item.key(), item.value().clone());
+    }
+    Ok(Json(report))
+}
+
+async fn get_relay_paths(State(state): State<IMHook>) -> app_error::Result<Json<BTreeMap<Uuid, (Vec<Uuid>, u64)>>> {
+    let mut report = BTreeMap::new();
+    for item in state.relay_paths.iter() {
         report.insert(*item.key(), item.value().clone());
     }
     Ok(Json(report))

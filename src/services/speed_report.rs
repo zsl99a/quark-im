@@ -7,17 +7,17 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
-use crate::{framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, abstracts::Service};
+use crate::{abstracts::Service, framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, quark::QuarkIM};
 
 pub struct SpeedReportService {
+    im: QuarkIM,
     peer_id: Uuid,
-    speeds: Arc<DashMap<Uuid, u64>>,
     report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
 }
 
 impl SpeedReportService {
-    pub fn new(peer_id: Uuid, speeds: Arc<DashMap<Uuid, u64>>, report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>) -> Self {
-        Self { peer_id, speeds, report }
+    pub fn new(im: QuarkIM, peer_id: Uuid, report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>) -> Self {
+        Self { im, peer_id, report }
     }
 }
 
@@ -42,11 +42,9 @@ impl Service for SpeedReportService {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
 
         loop {
-            let mut speeds = BTreeMap::new();
-            for item in self.speeds.iter() {
-                speeds.insert(*item.key(), *item.value());
+            if let Some(speeds) = self.report.get(&self.im.peer_id) {
+                stream.send(speeds.value().clone()).await?;
             }
-            stream.send(speeds).await?;
             interval.tick().await;
         }
     }
