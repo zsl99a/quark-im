@@ -7,7 +7,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
-use crate::{framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, service::Service};
+use crate::{framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, abstracts::Service};
 
 pub struct SpeedReportService {
     peer_id: Uuid,

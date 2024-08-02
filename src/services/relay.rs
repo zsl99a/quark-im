@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::service::Service;
+use crate::abstracts::Service;
 
 pub struct RelayService {}
 
