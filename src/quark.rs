@@ -21,31 +21,20 @@ pub struct QuarkIM {
 }
 
 impl QuarkIM {
-    pub async fn new<H>(hooks: H, client: Client, server: Server) -> Result<Self>
+    pub fn new<H>(client: Client, local_info: PeerInfo, hooks: H) -> Self
     where
         H: QuarkIMHook,
     {
-        let mut local_info = PeerInfo::new();
-        local_info.endpoints.push(SocketAddr::from(([127, 0, 0, 1], server.local_addr()?.port())));
-
         let peers = Arc::new(DashMap::new());
         peers.insert(local_info.peer_id, local_info.clone());
 
-        let im = QuarkIM {
+        QuarkIM {
             client,
             peer_id: local_info.peer_id,
             peers,
             handles: Arc::new(DashMap::new()),
             hooks: Arc::new(hooks),
-        };
-
-        im.server_task(server);
-
-        if let Ok(endpoint) = dotenvy::var("QUARK_CONNECT_ENDPOINT").unwrap_or_default().parse::<SocketAddr>() {
-            im.connect(endpoint).await?;
         }
-
-        Ok(im)
     }
 
     pub fn start_service_task(&self, peer_id: Uuid, name: String) {
@@ -104,6 +93,22 @@ impl QuarkIM {
         tokio::spawn(async move { im.connection_handle(stream, connection, ServiceMode::Start).await });
 
         Ok(())
+    }
+
+    pub fn server_task(&self, mut server: Server) -> JoinHandle<()> {
+        let im = self.clone();
+
+        tokio::spawn(async move {
+            while let Some(mut connection) = server.accept().await {
+                let im = im.clone();
+
+                tokio::spawn(async move {
+                    let stream = connection.accept_bidirectional_stream().await?.context("failed to accept stream")?;
+
+                    im.connection_handle(stream, connection, ServiceMode::Handle).await
+                });
+            }
+        })
     }
 }
 
@@ -166,21 +171,5 @@ impl QuarkIM {
         }
 
         Ok(())
-    }
-
-    fn server_task(&self, mut server: Server) -> JoinHandle<()> {
-        let im = self.clone();
-
-        tokio::spawn(async move {
-            while let Some(mut connection) = server.accept().await {
-                let im = im.clone();
-
-                tokio::spawn(async move {
-                    let stream = connection.accept_bidirectional_stream().await?.context("failed to accept stream")?;
-
-                    im.connection_handle(stream, connection, ServiceMode::Handle).await
-                });
-            }
-        })
     }
 }

@@ -46,7 +46,15 @@ async fn main() -> Result<()> {
         relay_paths: Arc::new(DashMap::new()),
     };
 
-    let im = QuarkIM::new(IMHook::new(state.clone()), client, server).await?;
+    let mut local_info = PeerInfo::new();
+    local_info.endpoints.push(SocketAddr::from(([127, 0, 0, 1], server.local_addr()?.port())));
+
+    let im = QuarkIM::new(client, local_info, IMHook::new(state.clone()));
+    im.server_task(server);
+
+    if let Ok(endpoint) = dotenvy::var("QUARK_CONNECT_ENDPOINT").unwrap_or_default().parse::<SocketAddr>() {
+        im.connect(endpoint).await?;
+    }
 
     tokio::spawn(RoutingQueryTask::new(im.peer_id, state.speeds.clone(), state.speed_report.clone(), state.relay_paths.clone()).future());
 
