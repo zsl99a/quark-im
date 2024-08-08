@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
-use crate::quark::QuarkIM;
+use crate::QuarkIM;
 
 #[async_trait]
 pub trait Service {

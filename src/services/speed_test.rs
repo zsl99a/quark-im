@@ -11,7 +11,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
-use crate::{abstracts::Service, framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, quark::QuarkIM};
+use crate::{abstracts::Service, framed_stream::FramedStream, io_stream::IoStream, message_pack::MessagePack, QuarkIM};
 
 pub struct SpeedTestService {
     im: QuarkIM,

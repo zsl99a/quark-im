@@ -4,11 +4,11 @@ use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
+    abstracts::{PeerInfo, Service},
     framed_stream::FramedStream,
     io_stream::IoStream,
     message_pack::MessagePack,
-    quark::QuarkIM,
-    abstracts::{PeerInfo, Service},
+    QuarkIM,
 };
 
 pub struct ReferralService {

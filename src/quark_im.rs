@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, fmt::Debug, net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use dashmap::DashMap;
+use dashmap::{mapref::one::Ref, DashMap};
 use s2n_quic::{client::Connect, connection::Handle, stream::BidirectionalStream, Client, Connection, Server};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -25,16 +25,17 @@ impl QuarkIM {
     where
         H: QuarkIMHook,
     {
-        let peers = Arc::new(DashMap::new());
-        peers.insert(local_info.peer_id, local_info.clone());
-
         QuarkIM {
             client,
             peer_id: local_info.peer_id,
-            peers,
+            peers: Arc::new(DashMap::from_iter([(local_info.peer_id, local_info)])),
             handles: Arc::new(DashMap::new()),
             hooks: Arc::new(hooks),
         }
+    }
+
+    pub fn local_info(&self) -> Result<Ref<Uuid, PeerInfo>> {
+        self.peers.get(&self.peer_id).context("failed to get local info")
     }
 
     pub fn start_service_task(&self, peer_id: Uuid, name: String) {
@@ -70,18 +71,14 @@ impl QuarkIM {
     pub async fn open_stream_with_link(&self, mut link_info: VecDeque<Uuid>) -> Result<BidirectionalStream> {
         let peer_id = link_info.pop_front().context("failed to get peer id")?;
 
-        if let Some(handle) = self.handles.get(&peer_id) {
-            let mut handle = handle.value().clone();
+        let mut handle = self.handles.get(&peer_id).context("failed to get handle")?.clone();
 
-            let mut stream = handle.open_bidirectional_stream().await?;
+        let mut stream = handle.open_bidirectional_stream().await?;
 
-            let mut negotiator = Negotiator::<VecDeque<Uuid>, _>::new(&mut stream);
-            negotiator.send(link_info).await?;
+        let mut negotiator = Negotiator::<VecDeque<Uuid>, _>::new(&mut stream);
+        negotiator.send(link_info).await?;
 
-            Ok(stream)
-        } else {
-            anyhow::bail!("peer not found");
-        }
+        Ok(stream)
     }
 
     pub async fn connect(&self, endpoint: SocketAddr) -> Result<()> {
@@ -118,9 +115,9 @@ impl QuarkIM {
 
         let mut negotiator = Negotiator::new(&mut stream);
 
-        let peer_info = self.peers.get(&self.peer_id).context("failed to get peer info")?.clone();
+        let local_info = self.local_info()?.clone();
 
-        negotiator.send(peer_info).await?;
+        negotiator.send(local_info).await?;
 
         let peer_info = negotiator.recv().await?;
 
@@ -157,9 +154,11 @@ impl QuarkIM {
                         }
                     } else {
                         let mut negotiator = Negotiator::new(&mut stream);
-                        let service_name = negotiator.recv().await?;
+                        let service_name: String = negotiator.recv().await?;
 
-                        im.hooks.handle(&im, stream, peer_id, service_name, ServiceMode::Handle).await?;
+                        if let Err(error) = im.hooks.handle(&im, stream, peer_id, service_name.clone(), ServiceMode::Handle).await {
+                            tracing::warn!(?error, ?peer_id, service_name, "failed to handle service");
+                        }
                     }
 
                     Result::<()>::Ok(())

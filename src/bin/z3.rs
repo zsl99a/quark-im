@@ -17,10 +17,10 @@ use quark_im::{
     framed_stream::FramedStream,
     io_stream::IoStream,
     message_pack::MessagePack,
-    quark::QuarkIM,
     quic::{create_client, create_server},
     services::{ReferralService, SpeedReportService, SpeedTestService},
     tasks::RoutingQueryTask,
+    QuarkIM,
 };
 use s2n_quic::stream::BidirectionalStream;
 use tracing::Level;
@@ -109,26 +109,30 @@ impl QuarkIMHook for IMHook {
     }
 
     async fn handle(&self, im: &QuarkIM, mut stream: BidirectionalStream, peer_id: Uuid, name: String, mode: ServiceMode) -> Result<()> {
+        let im = im.clone();
         let hook = self.clone();
 
         match (name.as_str(), mode) {
-            (ReferralService::NAME, ServiceMode::Start) => ReferralService::new(im.clone()).start(stream).await?,
-            (ReferralService::NAME, ServiceMode::Handle) => ReferralService::new(im.clone()).handle(stream).await?,
-            (SpeedTestService::NAME, ServiceMode::Start) => SpeedTestService::new(im.clone(), peer_id, hook.speed_report).start(stream).await?,
-            (SpeedTestService::NAME, ServiceMode::Handle) => SpeedTestService::new(im.clone(), peer_id, hook.speed_report).handle(stream).await?,
-            (SpeedReportService::NAME, ServiceMode::Start) => SpeedReportService::new(im.clone(), peer_id, hook.speed_report).start(stream).await?,
-            (SpeedReportService::NAME, ServiceMode::Handle) => SpeedReportService::new(im.clone(), peer_id, hook.speed_report).handle(stream).await?,
+            (ReferralService::NAME, ServiceMode::Start) => ReferralService::new(im).start(stream).await,
+            (ReferralService::NAME, ServiceMode::Handle) => ReferralService::new(im).handle(stream).await,
+            (SpeedTestService::NAME, ServiceMode::Start) => SpeedTestService::new(im, peer_id, hook.speed_report).start(stream).await,
+            (SpeedTestService::NAME, ServiceMode::Handle) => SpeedTestService::new(im, peer_id, hook.speed_report).handle(stream).await,
+            (SpeedReportService::NAME, ServiceMode::Start) => SpeedReportService::new(im, peer_id, hook.speed_report).start(stream).await,
+            (SpeedReportService::NAME, ServiceMode::Handle) => SpeedReportService::new(im, peer_id, hook.speed_report).handle(stream).await,
             ("RelayDemoService", ServiceMode::Handle) => {
-                while let Some(Ok(item)) = stream.next().await {
-                    tracing::info!(?item, "received");
-                    stream.send(item).await?;
+                async {
+                    while let Some(Ok(item)) = stream.next().await {
+                        tracing::info!(?item, "received");
+                        stream.send(item).await?;
+                    }
+                    Result::<()>::Ok(())
                 }
+                .await
             }
             _ => {
-                tracing::warn!(name, ?mode, "failed to find service")
+                anyhow::bail!("failed to find service")
             }
         }
-        Ok(())
     }
 }
 
