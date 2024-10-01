@@ -1,5 +1,4 @@
 mod referral;
-mod relay;
 mod speed_report;
 mod speed_test;
 

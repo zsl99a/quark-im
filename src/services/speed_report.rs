@@ -31,7 +31,7 @@ impl Drop for SpeedReportService {
 impl Service for SpeedReportService {
     const NAME: &'static str = "SpeedTestReportService";
 
-    async fn start<I>(self, stream: I) -> Result<()>
+    async fn client<I>(self, stream: I) -> Result<()>
     where
         I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
@@ -49,7 +49,7 @@ impl Service for SpeedReportService {
         }
     }
 
-    async fn handle<I>(self, stream: I) -> Result<()>
+    async fn server<I>(self, stream: I) -> Result<()>
     where
         I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {

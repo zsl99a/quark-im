@@ -1,22 +1,12 @@
-use std::{
-    collections::{BTreeMap, VecDeque},
-    net::SocketAddr,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use axum::{extract::State, handler::HandlerWithoutStateExt, response::Redirect, routing::get, Json, Router};
 use dashmap::DashMap;
-use futures::{SinkExt, StreamExt};
 use quark_im::{
     abstracts::{PeerInfo, QuarkIMHook, Service, ServiceMode},
     app_error,
-    framed_stream::FramedStream,
-    io_stream::IoStream,
-    message_pack::MessagePack,
     quic::{create_client, create_server},
     services::{ReferralService, SpeedReportService, SpeedTestService},
     tasks::RoutingQueryTask,
@@ -50,8 +40,6 @@ async fn main() -> Result<()> {
 
     tokio::spawn(RoutingQueryTask::new(im.peer_id, hook.speed_report.clone(), hook.relay_paths.clone()).future());
 
-    // tokio::spawn(link_test(im.clone()));
-
     let routes = root_route(im.clone(), hook.clone());
     let server_addr = SocketAddr::from(([0, 0, 0, 0], server_port + 1));
     let tcp_listener = tokio::net::TcpListener::bind(&server_addr).await?;
@@ -60,35 +48,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-pub async fn link_test(im: QuarkIM) -> Result<()> {
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    let stream = im
-        .open_service_stream_with_link(
-            "RelayDemoService".into(),
-            VecDeque::from(vec![
-                Uuid::from_str("15f345c0-0d09-4ad4-87e9-77a9c6643764")?,
-                Uuid::from_str("c5d67dfc-700c-490f-a93a-afbdfd61ef0a")?,
-                Uuid::from_str("ebacd816-f470-46f1-988e-2f0b254ffb75")?,
-            ]),
-        )
-        .await?;
-
-    let mut stream = FramedStream::new(IoStream::new(stream), MessagePack::<String, String>::default());
-
-    loop {
-        let ins = Instant::now();
-        stream.send("hello".into()).await?;
-        let msg = stream.next().await.context("failed to receive message")??;
-        tracing::info!(msg, elapsed = ?ins.elapsed());
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct IMHook {
     speed_report: Arc<DashMap<Uuid, BTreeMap<Uuid, u64>>>,
     relay_paths: Arc<DashMap<Uuid, (Vec<Uuid>, u64)>>,
+}
+
+impl Default for IMHook {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IMHook {
@@ -108,30 +77,18 @@ impl QuarkIMHook for IMHook {
         im.start_service_task(peer_id, SpeedReportService::NAME.into());
     }
 
-    async fn handle(&self, im: &QuarkIM, mut stream: BidirectionalStream, peer_id: Uuid, name: String, mode: ServiceMode) -> Result<()> {
+    async fn handle(&self, im: &QuarkIM, stream: BidirectionalStream, peer_id: Uuid, name: String, mode: ServiceMode) -> Result<()> {
         let im = im.clone();
         let hook = self.clone();
 
         match (name.as_str(), mode) {
-            (ReferralService::NAME, ServiceMode::Start) => ReferralService::new(im).start(stream).await,
-            (ReferralService::NAME, ServiceMode::Handle) => ReferralService::new(im).handle(stream).await,
-            (SpeedTestService::NAME, ServiceMode::Start) => SpeedTestService::new(im, peer_id, hook.speed_report).start(stream).await,
-            (SpeedTestService::NAME, ServiceMode::Handle) => SpeedTestService::new(im, peer_id, hook.speed_report).handle(stream).await,
-            (SpeedReportService::NAME, ServiceMode::Start) => SpeedReportService::new(im, peer_id, hook.speed_report).start(stream).await,
-            (SpeedReportService::NAME, ServiceMode::Handle) => SpeedReportService::new(im, peer_id, hook.speed_report).handle(stream).await,
-            ("RelayDemoService", ServiceMode::Handle) => {
-                async {
-                    while let Some(Ok(item)) = stream.next().await {
-                        tracing::info!(?item, "received");
-                        stream.send(item).await?;
-                    }
-                    Result::<()>::Ok(())
-                }
-                .await
-            }
-            _ => {
-                anyhow::bail!("failed to find service")
-            }
+            (ReferralService::NAME, ServiceMode::Client) => ReferralService::new(im).client(stream).await,
+            (ReferralService::NAME, ServiceMode::Server) => ReferralService::new(im).server(stream).await,
+            (SpeedTestService::NAME, ServiceMode::Client) => SpeedTestService::new(im, peer_id, hook.speed_report).client(stream).await,
+            (SpeedTestService::NAME, ServiceMode::Server) => SpeedTestService::new(im, peer_id, hook.speed_report).server(stream).await,
+            (SpeedReportService::NAME, ServiceMode::Client) => SpeedReportService::new(im, peer_id, hook.speed_report).client(stream).await,
+            (SpeedReportService::NAME, ServiceMode::Server) => SpeedReportService::new(im, peer_id, hook.speed_report).server(stream).await,
+            _ => anyhow::bail!("failed to find service"),
         }
     }
 }
@@ -152,7 +109,7 @@ async fn get_routing(State(state): State<QuarkIM>) -> app_error::Result<Json<BTr
             .peers
             .iter()
             .map(|peer| {
-                let peer_id = peer.key().clone();
+                let peer_id = *peer.key();
                 let info = peer.value().clone();
                 (peer_id, info)
             })

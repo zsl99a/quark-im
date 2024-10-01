@@ -37,7 +37,7 @@ impl Drop for SpeedTestService {
 impl Service for SpeedTestService {
     const NAME: &'static str = "SpeedTestService";
 
-    async fn start<I>(self, stream: I) -> Result<()>
+    async fn client<I>(self, stream: I) -> Result<()>
     where
         I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
@@ -54,7 +54,7 @@ impl Service for SpeedTestService {
 
             let elapsed = ins.elapsed().as_micros() as u64;
 
-            let mut lock = self.report.entry(self.im.peer_id).or_insert(Default::default());
+            let mut lock = self.report.entry(self.im.peer_id).or_default();
             if let Some(e) = lock.get_mut(&self.peer_id) {
                 *e = (*e * 9 + elapsed) / 10
             } else {
@@ -66,7 +66,7 @@ impl Service for SpeedTestService {
         }
     }
 
-    async fn handle<I>(self, stream: I) -> Result<()>
+    async fn server<I>(self, stream: I) -> Result<()>
     where
         I: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {

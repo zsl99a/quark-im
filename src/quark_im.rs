@@ -53,9 +53,9 @@ impl QuarkIM {
     pub fn start_service_task_with_link(&self, name: String, link_info: VecDeque<Uuid>) {
         let im = self.clone();
         tokio::spawn(async move {
-            let peer_id = *link_info.get(link_info.len() - 1).context("failed to get peer id")?;
+            let peer_id = *link_info.back().context("failed to get peer id")?;
             let stream = im.clone().open_service_stream_with_link(name.clone(), link_info).await?;
-            im.hooks.handle(&im, stream, peer_id, name, ServiceMode::Start).await
+            im.hooks.handle(&im, stream, peer_id, name, ServiceMode::Client).await
         });
     }
 
@@ -87,7 +87,7 @@ impl QuarkIM {
         let im = self.clone();
         let stream = connection.open_bidirectional_stream().await?;
 
-        tokio::spawn(async move { im.connection_handle(stream, connection, ServiceMode::Start).await });
+        tokio::spawn(async move { im.connection_handle(stream, connection, ServiceMode::Client).await });
 
         Ok(())
     }
@@ -102,7 +102,7 @@ impl QuarkIM {
                 tokio::spawn(async move {
                     let stream = connection.accept_bidirectional_stream().await?.context("failed to accept stream")?;
 
-                    im.connection_handle(stream, connection, ServiceMode::Handle).await
+                    im.connection_handle(stream, connection, ServiceMode::Server).await
                 });
             }
         })
@@ -132,11 +132,11 @@ impl QuarkIM {
             let peer_id = peer_info.peer_id;
 
             match mode {
-                ServiceMode::Start => self.hooks.client_side(&self, peer_id),
-                ServiceMode::Handle => self.hooks.server_side(&self, peer_id),
+                ServiceMode::Client => self.hooks.client_side(self, peer_id),
+                ServiceMode::Server => self.hooks.server_side(self, peer_id),
             }
 
-            self.hooks.both_sides(&self, peer_id);
+            self.hooks.both_sides(self, peer_id);
 
             while let Some(mut stream) = acceptor.accept_bidirectional_stream().await? {
                 let im = self.clone();
@@ -145,19 +145,19 @@ impl QuarkIM {
                     let mut negotiator = Negotiator::<VecDeque<Uuid>, _>::new(&mut stream);
                     let link_info = negotiator.recv().await?;
 
-                    if !link_info.is_empty() {
+                    if link_info.is_empty() {
+                        let mut negotiator = Negotiator::new(&mut stream);
+                        let service_name: String = negotiator.recv().await?;
+
+                        if let Err(error) = im.hooks.handle(&im, stream, peer_id, service_name.clone(), ServiceMode::Server).await {
+                            tracing::warn!(?error, ?peer_id, service_name, "failed to handle service");
+                        }
+                    } else {
                         let mut relay_stream = im.open_stream_with_link(link_info).await?;
 
                         while let Err(error) = tokio::io::copy_bidirectional(&mut stream, &mut relay_stream).await {
                             tracing::error!(?error, "relay stream error");
                             break;
-                        }
-                    } else {
-                        let mut negotiator = Negotiator::new(&mut stream);
-                        let service_name: String = negotiator.recv().await?;
-
-                        if let Err(error) = im.hooks.handle(&im, stream, peer_id, service_name.clone(), ServiceMode::Handle).await {
-                            tracing::warn!(?error, ?peer_id, service_name, "failed to handle service");
                         }
                     }
 

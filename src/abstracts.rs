@@ -13,11 +13,11 @@ use crate::QuarkIM;
 pub trait Service {
     const NAME: &'static str;
 
-    async fn start<I>(self, stream: I) -> Result<()>
+    async fn client<I>(self, stream: I) -> Result<()>
     where
         I: AsyncRead + AsyncWrite + Send + Sync + Unpin;
 
-    async fn handle<I>(self, stream: I) -> Result<()>
+    async fn server<I>(self, stream: I) -> Result<()>
     where
         I: AsyncRead + AsyncWrite + Send + Sync + Unpin;
 }
@@ -36,8 +36,8 @@ pub trait QuarkIMHook: Debug + Send + Sync + 'static {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ServiceMode {
-    Start,
-    Handle,
+    Client,
+    Server,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
