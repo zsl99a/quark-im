@@ -34,7 +34,7 @@ impl QuarkIM {
         }
     }
 
-    pub fn local_info(&self) -> Result<Ref<Uuid, PeerInfo>> {
+    pub fn local_info(&self) -> Result<Ref<'_, Uuid, PeerInfo>> {
         self.peers.get(&self.peer_id).context("failed to get local info")
     }
 
