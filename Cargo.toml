@@ -2,6 +2,11 @@
 name = "quark-im"
 version = "0.1.0"
 edition = "2021"
+description = "基于 Rust 与 QUIC 协议的高性能 P2P 实时通信、链路动态测速寻优与分布式流中继网络框架"
+license = "MIT"
+repository = "https://github.com/zsl99a/quark-im"
+keywords = ["quic", "p2p", "relay", "dijkstra", "tokio"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 # common
